@@ -1,6 +1,6 @@
 #  一条命令部署 Telegram MTProto
 
-VPS 上一键部署 **Telegram MTProto
+VPS 上一键部署 Telegram MTProto
 
 
 ---
