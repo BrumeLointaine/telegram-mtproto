@@ -82,7 +82,6 @@ EOF
 systemctl daemon-reload
 systemctl enable mtg >/dev/null 2>&1
 systemctl restart mtg
-mtg doctor /etc/mtg.toml 
 sleep 2
 
 if systemctl is-active --quiet mtg; then
