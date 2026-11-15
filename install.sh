@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ================= 配置区 =================
-MTG_VERSION="2.3.0"
-FAKE_DOMAIN="mt.0m.de5.net"
+MTG_VERSION=""          # 留空则自动获取最新版；也可手动填写如 "2.3.0"
+FAKE_DOMAIN="www.cloudflare.com"
 BIND_PORT="443"
 # ==========================================
 
@@ -13,6 +13,21 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 die()  { echo -e "${RED}[x]${NC} $*"; exit 1; }
 
 [[ $EUID -ne 0 ]] && die "请使用 root 权限运行此脚本"
+
+# ---------- 获取版本号 ----------
+if [[ -z "$MTG_VERSION" ]]; then
+    log "正在查询 mtg 最新版本..."
+    MTG_VERSION=$(curl -s --max-time 10 https://api.github.com/repos/9seconds/mtg/releases/latest \
+        | grep -oP '"tag_name":\s*"v\K[^"]+' || true)
+    if [[ -z "$MTG_VERSION" ]]; then
+        warn "自动获取版本失败，回退到 v2.3.0"
+        MTG_VERSION="2.3.0"
+    else
+        log "获取到最新版本: v${MTG_VERSION}"
+    fi
+else
+    log "使用指定版本: v${MTG_VERSION}"
+fi
 
 ARCH=$(uname -m)
 case "$ARCH" in
