@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ================= 配置区 =================
 MTG_VERSION="2.3.0"
-FAKE_DOMAIN="www.cloudflare.com"
+FAKE_DOMAIN="0m.de5.net"
 BIND_PORT="443"
 # ==========================================
 
