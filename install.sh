@@ -14,11 +14,33 @@ die()  { echo -e "${RED}[x]${NC} $*"; exit 1; }
 
 [[ $EUID -ne 0 ]] && die "请使用 root 权限运行此脚本"
 
-# ---------- 获取版本号 ----------
+# ---------- 识别系统与服务管理器 ----------
+HAS_SYSTEMD=0
+HAS_OPENRC=0
+if command -v systemctl >/dev/null 2>&1; then HAS_SYSTEMD=1; fi
+if command -v rc-update >/dev/null 2>&1 && [ -d /etc/init.d ]; then HAS_OPENRC=1; fi
+if [[ $HAS_SYSTEMD -eq 0 && $HAS_OPENRC -eq 0 ]]; then
+    die "未检测到 systemd 或 OpenRC，无法配置开机自启"
+fi
+log "服务管理器: $( [[ $HAS_SYSTEMD -eq 1 ]] && echo systemd || echo openrc )"
+
+# ---------- 安装基础依赖 ----------
+log "检查并安装基础依赖..."
+if command -v apt-get >/dev/null; then
+    apt-get update -qq && apt-get install -y -qq curl wget tar ca-certificates >/dev/null 2>&1
+elif command -v yum >/dev/null; then
+    yum install -y -q curl wget tar ca-certificates >/dev/null 2>&1
+elif command -v apk >/dev/null; then
+    apk add --no-cache curl wget tar ca-certificates >/dev/null 2>&1
+else
+    warn "未识别包管理器，请确保 curl/wget/tar 已安装"
+fi
+
+# ---------- 获取版本号（兼容无 PCRE 的 grep）----------
 if [[ -z "$MTG_VERSION" ]]; then
     log "正在查询 mtg 最新版本..."
     MTG_VERSION=$(curl -s --max-time 10 https://api.github.com/repos/9seconds/mtg/releases/latest \
-        | grep -oP '"tag_name":\s*"v\K[^"]+' || true)
+        | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -n1 || true)
     if [[ -z "$MTG_VERSION" ]]; then
         warn "自动获取版本失败，回退到 v2.3.0"
         MTG_VERSION="2.3.0"
@@ -31,18 +53,11 @@ fi
 
 ARCH=$(uname -m)
 case "$ARCH" in
-    x86_64)  MTG_ARCH="amd64" ;;
+    x86_64)        MTG_ARCH="amd64" ;;
     aarch64|arm64) MTG_ARCH="arm64" ;;
     *) die "不支持的架构: $ARCH" ;;
 esac
 log "检测到架构: $ARCH -> mtg-${MTG_VERSION}-linux-${MTG_ARCH}"
-
-log "检查并安装基础依赖..."
-if command -v apt-get >/dev/null; then
-    apt-get update -qq && apt-get install -y -qq curl wget tar >/dev/null 2>&1
-elif command -v yum >/dev/null; then
-    yum install -y -q curl wget tar >/dev/null 2>&1
-fi
 
 TARBALL="mtg-${MTG_VERSION}-linux-${MTG_ARCH}.tar.gz"
 URL="https://github.com/9seconds/mtg/releases/download/v${MTG_VERSION}/${TARBALL}"
@@ -55,10 +70,8 @@ wget -q -O "${TMPDIR}/${TARBALL}" "$URL" || die "下载失败，请检查网络�
 log "安装 mtg 二进制文件..."
 tar -xzf "${TMPDIR}/${TARBALL}" -C "$TMPDIR"
 
-# 写死官方压缩包内的准确路径
 MTG_BIN="${TMPDIR}/mtg-${MTG_VERSION}-linux-${MTG_ARCH}/mtg"
 if [ ! -f "$MTG_BIN" ]; then
-    # 万一官方未来又改了外层目录名，再用 find 兜底一次
     MTG_BIN=$(find "$TMPDIR" -type f -name "mtg" | head -n 1)
     [ -z "$MTG_BIN" ] && die "解压后依然找不到 mtg 二进制文件"
 fi
@@ -78,8 +91,10 @@ bind-to = "0.0.0.0:${BIND_PORT}"
 EOF
 chmod 600 /etc/mtg.toml
 
-log "配置 systemd 服务..."
-cat > /etc/systemd/system/mtg.service <<EOF
+# ---------- 配置服务 ----------
+if [[ $HAS_SYSTEMD -eq 1 ]]; then
+    log "配置 systemd 服务..."
+    cat > /etc/systemd/system/mtg.service <<EOF
 [Unit]
 Description=mtg MTProto proxy
 After=network.target
@@ -93,19 +108,54 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+    systemctl daemon-reload
+    systemctl enable mtg >/dev/null 2>&1
+    systemctl restart mtg
+else
+    log "配置 OpenRC 服务 (Alpine)..."
+    cat > /etc/init.d/mtg <<'EOF'
+#!/sbin/openrc-run
+description="mtg MTProto proxy"
+command="/usr/local/bin/mtg"
+command_args="run /etc/mtg.toml"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/mtg.log"
+error_log="/var/log/mtg.log"
+respawn_delay=3
 
-systemctl daemon-reload
-systemctl enable mtg >/dev/null 2>&1
-systemctl restart mtg
+depend() {
+    need net
+    after firewall
+}
+EOF
+    chmod 755 /etc/init.d/mtg
+    rc-update add mtg default >/dev/null 2>&1 || true
+    rc-service mtg restart >/dev/null 2>&1 || rc-service mtg start
+fi
+
 sleep 2
 
-if systemctl is-active --quiet mtg; then
+# ---------- 健康检查 ----------
+RUNNING=0
+if [[ $HAS_SYSTEMD -eq 1 ]]; then
+    systemctl is-active --quiet mtg && RUNNING=1
+else
+    rc-service mtg status >/dev/null 2>&1 && RUNNING=1
+fi
+
+if [[ $RUNNING -eq 1 ]]; then
     log "mtg 服务已成功启动！"
 else
-    journalctl -u mtg -n 10 --no-pager
+    if [[ $HAS_SYSTEMD -eq 1 ]]; then
+        journalctl -u mtg -n 10 --no-pager
+    else
+        tail -n 10 /var/log/mtg.log 2>/dev/null || true
+    fi
     die "mtg 启动失败，请查看上面的日志"
 fi
 
+# ---------- 输出连接信息 ----------
 log "正在获取公网 IP..."
 IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 icanhazip.com 2>/dev/null || echo "YOUR_VPS_IP")
 
